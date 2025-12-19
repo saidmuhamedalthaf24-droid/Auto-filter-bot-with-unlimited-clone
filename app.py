@@ -1,46 +1,37 @@
 import os
 import asyncio
-import random
-from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-import motor.motor_asyncio
-from info import API_ID, API_HASH, BOT_TOKEN, DB_URI, OWNER_ID, CHANNEL_ID, CLONE_DB_URI, LOG_CHANNEL
+from motor.motor_asyncio import AsyncIOMotorClient
+import pymongo
+from info import *
 
 app = Client("filter_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Main Database
-mongo_client = motor.motor_asyncio.AsyncIOMotorClient(DB_URI)
-db = mongo_client.filter_bot
+# MongoDB Connections
+mongo_client = AsyncIOMotorClient(DB_URI)
+db = mongo_client.filterbot
 filters_db = db.filters
-users_db = db.users
+clone_db = AsyncIOMotorClient(CLONE_DB_URI)["clonebot"]["clones"]
 
-# Clone Database
-clone_client = motor.motor_asyncio.AsyncIOMotorClient(CLONE_DB_URI)
-clone_db = clone_client.clone_bot
-clones_collection = clone_db.clones
+CHANNEL_ID = int(CHANNEL_ID)
+LOG_CHANNEL = int(LOG_CHANNEL)
 
-async def log_activity(text):
-    """Log all activities to LOG_CHANNEL"""
-    try:
-        await app.send_message(LOG_CHANNEL, f"📝 **Log**: {text}")
-    except:
-        pass
+btn = InlineKeyboardMarkup([
+    [InlineKeyboardButton("➕ Add Filter", callback_data="add_filter")],
+    [InlineKeyboardButton("🔄 Clone Bot", callback_data="clone_bot")]
+])
 
-@app.on_message(filters.command("start"))
+@app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
-    user_id = message.from_user.id
-    await log_activity(f"👤 User started bot: [{user_id}](tg://user?id={user_id}) - {message.from_user.first_name}")
-    
-    btn = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 Clone Bot", callback_data="clone_menu")],
-        [InlineKeyboardButton("📚 Help", callback_data="help_menu")],
-        [InlineKeyboardButton("📊 Stats", callback_data="stats")]
-    ])
-    await message.reply(
-        "🔥 **VJ Filter Clone Bot** (Full Featured)
+    await message.reply_text(
+        "🔥 **VJ Filter Clone Bot** (Full Featured)",
+        reply_markup=btn
+    )
 
-"
+@app.on_callback_query(filters.regex("add_filter"))
+async def add_filter(client, callback):
+    await callback.message.edit_text(
         f"📢 **Channel**: `{CHANNEL_ID}`
 "
         f"📝 **Logs**: `{LOG_CHANNEL}`
@@ -52,126 +43,127 @@ async def start(client, message):
         "• Complete Logging
 "
         "• /add /del /index /broadcast",
-        reply_markup=btn
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 Add Filter", callback_data="add_manual")]
+        ])
     )
 
-@app.on_callback_query(filters.regex("clone_menu"))
-async def clone_menu(client, callback):
-    await log_activity(f"🔄 Clone menu opened: [{callback.from_user.id}](tg://user?id={callback.from_user.id})")
-    btn = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Create Clone", callback_data="create_clone")],
-        [InlineKeyboardButton("📋 My Clones", callback_data="my_clones")],
-        [InlineKeyboardButton("🔙 Back", callback_data="start_menu")]
-    ])
-    await callback.edit_message_text("🚀 **Clone Menu**
+@app.on_message(filters.command("add") & filters.private)
+async def add_filter_cmd(client, message):
+    await message.reply_text("Send: /add Movie Name | Message ID")
 
-**All clones logged in**: `{LOG_CHANNEL}`", reply_markup=btn)
-
-@app.on_callback_query(filters.regex("create_clone"))
-async def create_clone(client, callback):
-    user_id = callback.from_user.id
-    clone_count = await clones_collection.count_documents({"user_id": user_id})
+@app.on_message(filters.private & filters.text)
+async def handle_filter_search(client, message):
+    name = message.text
+    filters_list = await filters_db.find({"name": {"$regex": name, "$options": "i"}}).to_list(length=10)
     
-    if clone_count >= 100:
-        await callback.answer("❌ Limit reached!", show_alert=True)
+    if not filters_list:
+        await message.reply_text("❌ No results found!")
         return
     
-    bot_id = random.randint(1000000000, 9999999999)
-    new_token = f"{int(BOT_TOKEN.split(':')[0])}:{bot_id}"
+    buttons = []
+    for flt in filters_list:
+        btn = InlineKeyboardButton(
+            f"🎥 {flt['name']}", 
+            callback_data=f"show_{flt['_id']}"
+        )
+        buttons.append([btn])
     
-    clone_data = {
+    await message.reply_text(
+        f"✅ **{len(filters_list)} results found:**",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+@app.on_callback_query(filters.regex(r"show_(.+)"))
+async def show_filter(client, callback):
+    flt_id = callback.data.split("_")[1]
+    fltr = await filters_db.find_one({"_id": int(flt_id)})
+    
+    if not fltr:
+        await callback.answer("Filter not found!")
+        return
+    
+    btn = InlineKeyboardButton("🎥 Get Movie", url=f"https://t.me/{(await app.get_me()).username}?start=msg_{fltr['msg_id']}")
+    
+    await callback.message.edit_text(
+        f"🎬 **{fltr['name']}**
+
+{fltr.get('desc', '')}",
+        reply_markup=InlineKeyboardMarkup([[btn]])
+    )
+
+# Clone Bot System
+@app.on_callback_query(filters.regex("clone_bot"))
+async def clone_menu(client, callback):
+    user_id = callback.from_user.id
+    clones = await clone_db.find({"user_id": user_id}).to_list(length=100)
+    
+    text = f"🤖 **Your Clones: {len(clones)}/100**
+
+"
+    buttons = []
+    
+    for clone in clones[-5:]:  # Last 5 clones
+        btn = InlineKeyboardButton(
+            f"🔗 {clone['token'][:20]}...", 
+            callback_data=f"manage_clone_{clone['_id']}"
+        )
+        buttons.append([btn])
+    
+    buttons.append([InlineKeyboardButton("➕ New Clone", callback_data="new_clone")])
+    
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+@app.on_callback_query(filters.regex("new_clone"))
+async def new_clone(client, callback):
+    user_id = callback.from_user.id
+    count = await clone_db.count_documents({"user_id": user_id})
+    
+    if count >= 100:
+        await callback.answer("❌ Max 100 clones reached!")
+        return
+    
+    new_token = f"CLONE_{user_id}_{count+1}"
+    await clone_db.insert_one({
         "user_id": user_id,
-        "username": callback.from_user.username or "unknown",
         "token": new_token,
-        "api_id": API_ID,
-        "api_hash": API_HASH,
-        "channel_id": CHANNEL_ID,
-        "db_uri": DB_URI,
-        "clone_db_uri": CLONE_DB_URI,
-        "log_channel": LOG_CHANNEL,
-        "created": datetime.now()
-    }
-    
-    await clones_collection.insert_one(clone_data)
-    
-    # Log clone creation
-    await log_activity(
-        f"✅ **New Clone Created**
-"
-        f"👤 User: [{user_id}](tg://user?id={user_id})
-"
-        f"🔑 Token: `{new_token}`
-"
-        f"📊 Total: {clone_count+1}"
-    )
-    
-    btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="clone_menu")]])
-    await callback.edit_message_text(
-        f"✅ **Clone #{clone_count+1} Created!**
-
-"
-        f"**Token**: `{new_token}`
-"
-        f"**Check logs**: `{LOG_CHANNEL}`
-
-"
-        f"**Deploy**: Fork → Render → All vars ready!",
-        reply_markup=btn
-    )
-
-# Channel Auto Filter (VJ Style + Logging)
-@app.on_message(filters.text & filters.group)
-async def channel_auto_filter(client, message):
-    name = message.text.strip().lower()
-    await log_activity(f"🔍 Search: `{name}` by [{message.from_user.id}](tg://user?id={message.from_user.id})")
-    
-    # Search CHANNEL_ID first
-    async for msg in client.search_messages(CHANNEL_ID, query=name, limit=10):
-        if msg.media:
-            btns = [[InlineKeyboardButton(f"🎥 {name}", callback_data=f"chfltr_{msg.id}")]]
-            await message.reply(f"✅ **Found in Channel** `{CHANNEL_ID}`!", reply_markup=InlineKeyboardMarkup(btns))
-            await log_activity(f"✅ Channel result found for: `{name}`")
-            return
-    
-    # MongoDB backup search
-    results = await filters_db.find({"name": {"$regex": name, "$options": "i"}}).to_list(10)
-    if results:
-        btns = []
-        for i, result in enumerate(results[:5], 1):
-            btns.append([InlineKeyboardButton(f"🎥 {i}", callback_data=f"fltr_{result['_id']}")])
-        if len(results) > 5:
-            btns.append([InlineKeyboardButton("➡️ More", callback_data=f"page_2_{name}")])
-        await message.reply("⏳ **Searching Filters...**", reply_markup=InlineKeyboardMarkup(btns))
-        await log_activity(f"✅ Filter results: {len(results)} for `{name}`")
-
-@app.on_message(filters.command("add") & filters.group)
-async def add_manual_filter(client, message):
-    if len(message.command) < 2:
-        return await message.reply("❌ `/add Movie Name` (reply to media)")
-    
-    name = " ".join(message.command[1:])
-    msg = message.reply_to_message
-    
-    if not msg or not msg.media:
-        return await message.reply("❌ Reply to media message!")
-    
-    await filters_db.insert_one({
-        "name": name.lower(),
-        "group_id": message.chat.id,
-        "message_id": msg.id,
-        "file_id": msg.document.file_id if msg.document else msg.video.file_id,
-        "added_by": message.from_user.id,
-        "added_date": datetime.now()
+        "created": asyncio.get_event_loop().time()
     })
     
-    await message.reply(f"✅ **Added**: `{name}`")
-    await log_activity(f"➕ Filter added: `{name}` by [{message.from_user.id}](tg://user?id={message.from_user.id})")
+    await callback.answer("✅ New clone created!")
 
-@app.on_message(filters.command("start") & filters.private)
-async def private_start(client, message):
-    await log_activity(f"🤖 Bot started by: [{message.from_user.id}](tg://user?id={message.from_user.id})")
+# Channel Filter Forwarding
+@app.on_message(filters.channel & filters.incoming)
+async def auto_filter(client, message):
+    if message.chat.id != CHANNEL_ID:
+        return
+    
+    msg_id = message.id
+    caption = message.caption or ""
+    
+    # Extract movie names (simple regex)
+    import re
+    movies = re.findall(r'([A-Z][a-zA-Zs&]{2,50})(?:s*(|[|||$)', caption, re.IGNORECASE)
+    
+    for movie in movies[:3]:  # Max 3 filters per message
+        await filters_db.update_one(
+            {"name": movie.strip()},
+            {"$set": {
+                "msg_id": msg_id,
+                "desc": caption,
+                "updated": asyncio.get_event_loop().time()
+            }},
+            upsert=True
+        )
+        
+        # Log
+        log_msg = f"**New Filter Added**
+🎬 `{movie.strip()}`
+📱 Msg: {msg_id}"
+        try:
+            await client.send_message(LOG_CHANNEL, log_msg)
+        except:
+            pass
 
-if __name__ == "__main__":
-    print("🚀 VJ Channel Filter Clone Bot + Logs Starting...")
-    asyncio.run(log_activity("🚀 Bot Started Successfully!"))
-    app.run()
+print("🚀 Bot Started Successfully!")
+app.run()
