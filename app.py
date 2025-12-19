@@ -32,15 +32,15 @@ async def start(client, message):
 @app.on_callback_query(filters.regex("add_filter"))
 async def add_filter(client, callback):
     await callback.message.edit_text(
-        f"📢 **Channel**: `{CHANNEL_ID}`
+        f"📢 **Channel**: `{CHANNEL_ID}`"
 "
-        f"📝 **Logs**: `{LOG_CHANNEL}`
+        f"📝 **Logs**: `{LOG_CHANNEL}`"
 "
-        "• Channel Auto Filter + SRB
+        "• Channel Auto Filter + SRB"
 "
-        "• Unlimited Clone System
+        "• Unlimited Clone System"
 "
-        "• Complete Logging
+        "• Complete Logging"
 "
         "• /add /del /index /broadcast",
         reply_markup=InlineKeyboardMarkup([
